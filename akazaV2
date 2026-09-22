@@ -11,7 +11,7 @@ local LocalPlayer = Players.LocalPlayer
 ------------------------
 -- SETTINGS
 ------------------------
-local maxDistance = 30
+local maxDistance = 28
 local fov = 0.01
 local checkInterval = 0.02
 ------------------------
@@ -183,7 +183,7 @@ local enabled = false
 local target = nil
 
 -- 数値を大きくすると速く追従
-local smoothness = 0.17
+local smoothness = 0.23
 
 -- 画面中央に一番近いプレイヤーを探す
 local function getClosestPlayerToCenter()
