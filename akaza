@@ -1,0 +1,174 @@
+-- FTAP Center Screen Auto Grab v8
+-- Toggle: Q
+-- Skips if YOU are already holding something + ignores already-grabbed players
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Camera = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+
+------------------------
+-- SETTINGS
+------------------------
+local maxDistance = 30
+local fov = 0.01
+local checkInterval = 0.02
+------------------------
+
+local enabled = false
+local isHolding = false
+local lastCheck = 0
+
+local function press()
+    pcall(function() if mouse1press then mouse1press() end end)
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        local vp = Camera.ViewportSize
+        vim:SendMouseButtonEvent(vp.X/2, vp.Y/2, 0, true, game, 1)
+    end)
+end
+
+local function release()
+    pcall(function() if mouse1release then mouse1release() end end)
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        local vp = Camera.ViewportSize
+        vim:SendMouseButtonEvent(vp.X/2, vp.Y/2, 0, false, game, 1)
+    end)
+end
+
+local function isCentered(pos)
+    local screen, onScreen = Camera:WorldToViewportPoint(pos)
+    if not onScreen or screen.Z <= 0 then return false end
+    local size = Camera.ViewportSize
+    local dx = (screen.X - size.X * 0.5) / size.X
+    local dy = (screen.Y - size.Y * 0.5) / size.Y
+    return (dx*dx + dy*dy) <= (fov*fov)
+end
+
+-- true if YOU currently have something grabbed
+local function isLocalPlayerHolding()
+    local grabParts = workspace:FindFirstChild("GrabParts")
+    if not grabParts then return false end
+    local grabPart = grabParts:FindFirstChild("GrabPart")
+    if not grabPart then return false end
+    local weld = grabPart:FindFirstChild("WeldConstraint")
+    if not weld or not weld.Part1 then return false end
+    -- if GrabParts exists and has a valid weld, someone (including you) is holding
+    -- we treat any active GrabParts as "already holding"
+    return true
+end
+
+-- true if the target player is already being held by someone
+local function isAlreadyGrabbed(character)
+    local grabParts = workspace:FindFirstChild("GrabParts")
+    if not grabParts then return false end
+    local grabPart = grabParts:FindFirstChild("GrabPart")
+    if not grabPart then return false end
+    local weld = grabPart:FindFirstChild("WeldConstraint")
+    if not weld or not weld.Part1 then return false end
+    return weld.Part1:IsDescendantOf(character)
+end
+
+local function isHeldByValue(character)
+    local player = Players:GetPlayerFromCharacter(character)
+    if player and player:FindFirstChild("IsHeld") and player.IsHeld.Value then
+        return true
+    end
+    return false
+end
+
+local function getBodyParts(character)
+    local parts = {}
+    for _, part in ipairs(character:GetChildren()) do
+        if part:IsA("BasePart") then
+            table.insert(parts, part)
+        end
+    end
+    return parts
+end
+
+RunService.Heartbeat:Connect(function()
+    if not enabled then
+        if isHolding then
+            release()
+            isHolding = false
+        end
+        return
+    end
+
+    -- if you are already holding something, do nothing
+    if isLocalPlayerHolding() then
+        if isHolding then
+            -- keep the hold state, but don't start a new grab
+            return
+        end
+        return
+    end
+
+    local now = tick()
+    if now - lastCheck < checkInterval then return end
+    lastCheck = now
+
+    local char = LocalPlayer.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    local found = false
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local otherRoot = plr.Character:FindFirstChild("HumanoidRootPart")
+            if otherRoot then
+                local dist = (root.Position - otherRoot.Position).Magnitude
+                if dist <= maxDistance then
+                    if not isAlreadyGrabbed(plr.Character) and not isHeldByValue(plr.Character) then
+                        for _, part in ipairs(getBodyParts(plr.Character)) do
+                            if isCentered(part.Position) then
+                                found = true
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if found then break end
+    end
+
+    if found then
+        if not isHolding then
+            press()
+            isHolding = true
+        end
+    else
+        if isHolding then
+            release()
+            isHolding = false
+        end
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.Q then
+        enabled = not enabled
+        if not enabled and isHolding then
+            release()
+            isHolding = false
+        end
+        print(enabled and "[AutoGrab] ON" or "[AutoGrab] OFF")
+    end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    if isHolding then
+        release()
+        isHolding = false
+    end
+end)
+
+print("[FTAP AutoGrab v8] Loaded - Press Q")
+print("Does nothing while you are already holding something")
