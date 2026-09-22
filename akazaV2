@@ -183,7 +183,7 @@ local enabled = false
 local target = nil
 
 -- 数値を大きくすると速く追従
-local smoothness = 0.35
+local smoothness = 0.17
 
 -- 画面中央に一番近いプレイヤーを探す
 local function getClosestPlayerToCenter()
