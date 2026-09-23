@@ -198,11 +198,6 @@ end)
 
 print("[FTAP AutoGrab v16] Loaded - Press Q")
 print("1s cooldown only after releasing Player / NPC")
-
-
-
-
-
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
