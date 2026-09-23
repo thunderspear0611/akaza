@@ -283,3 +283,139 @@ RunService:BindToRenderStep(
 		)
 	end
 )
+-- FTAP Pallet Assist v2
+-- Toggle: V
+-- Unload: P (completely removes the script)
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+------------------------
+-- SETTINGS
+------------------------
+local maxStickDistance = 6
+local checkInterval = 0.03
+------------------------
+
+local enabled = false
+local connection = nil
+local inputConn = nil
+local charConn = nil
+local align = nil
+local lastCheck = 0
+local unloaded = false
+
+local function getRoot()
+    local char = LocalPlayer.Character
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function clearAssist()
+    if align then
+        pcall(function() align:Destroy() end)
+        align = nil
+    end
+end
+
+local function isPalletLike(part)
+    if not part or not part:IsA("BasePart") or part.Anchored then return false end
+    local name = part.Name:lower()
+    if name:find("pallet") or name:find("board") or name:find("platform") or name:find("wood") or name:find("plank") then
+        return true
+    end
+    local size = part.Size
+    return size.Y < 4 and (size.X > 3 or size.Z > 3)
+end
+
+local function findPlatformBelow(root)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {LocalPlayer.Character}
+    local result = workspace:Raycast(root.Position, Vector3.new(0, -maxStickDistance, 0), params)
+    if result and isPalletLike(result.Instance) then
+        return result.Instance, result.Position
+    end
+    return nil, nil
+end
+
+local function createAlign(root, platform)
+    clearAssist()
+    local att0 = Instance.new("Attachment")
+    att0.Parent = root
+    local att1 = Instance.new("Attachment")
+    att1.Parent = platform
+
+    local a = Instance.new("AlignPosition")
+    a.Attachment0 = att0
+    a.Attachment1 = att1
+    a.RigidityEnabled = false
+    a.MaxForce = 25000
+    a.MaxVelocity = 40
+    a.Responsiveness = 25
+    a.ApplyAtCenterOfMass = true
+    a.Parent = root
+    align = a
+
+    -- keep a small offset so you stand on top
+    att1.Position = Vector3.new(0, platform.Size.Y * 0.5 + 2.5, 0)
+end
+
+local function mainLoop()
+    if unloaded then return end
+    if not enabled then
+        clearAssist()
+        return
+    end
+
+    local now = tick()
+    if now - lastCheck < checkInterval then return end
+    lastCheck = now
+
+    local root = getRoot()
+    if not root then
+        clearAssist()
+        return
+    end
+
+    local platform = findPlatformBelow(root)
+    if platform then
+        if not align or align.Parent ~= root then
+            createAlign(root, platform)
+        end
+    else
+        clearAssist()
+    end
+end
+
+local function unload()
+    if unloaded then return end
+    unloaded = true
+    enabled = false
+    clearAssist()
+    if connection then connection:Disconnect() end
+    if inputConn then inputConn:Disconnect() end
+    if charConn then charConn:Disconnect() end
+    print("[Pallet Assist] Fully unloaded")
+end
+
+connection = RunService.Heartbeat:Connect(mainLoop)
+
+inputConn = UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe or unloaded then return end
+    if input.KeyCode == Enum.KeyCode.V then
+        enabled = not enabled
+        if not enabled then clearAssist() end
+        print(enabled and "[Pallet Assist] ON" or "[Pallet Assist] OFF")
+    elseif input.KeyCode == Enum.KeyCode.P then
+        unload()
+    end
+end)
+
+charConn = LocalPlayer.CharacterAdded:Connect(function()
+    clearAssist()
+end)
+
+print("[FTAP Pallet Assist v2] Loaded")
+print("V = toggle | P = full unload")
