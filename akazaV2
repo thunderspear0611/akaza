@@ -198,6 +198,11 @@ end)
 
 print("[FTAP AutoGrab v16] Loaded - Press Q")
 print("1s cooldown only after releasing Player / NPC")
+
+
+
+
+
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -209,7 +214,7 @@ local enabled = false
 local target = nil
 
 -- 数値を大きくすると速く追従
-local smoothness = 0.23
+local smoothness = 0.18
 
 -- 画面中央に一番近いプレイヤーを探す
 local function getClosestPlayerToCenter()
