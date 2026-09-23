@@ -1,0 +1,1031 @@
+--[[
+    FTAP Tools - Integrated with Obsidian UI
+    AutoGrab v16 + Head Lock + Pallet Assist v2 + World Visual Enhancer v6
+]]
+
+local repo = "https://raw.githubusercontent.com/deividcomsono/Obsidian/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+local SaveManager = loadstring(game:HttpGet(repo .. "addons/SaveManager.lua"))()
+
+local Options = Library.Options
+local Toggles = Library.Toggles
+
+Library.ForceCheckbox = false
+Library.ShowToggleFrameInKeybinds = true
+
+local Window = Library:CreateWindow({
+	Title = "FTAP Tools",
+	Footer = "AutoGrab + HeadLock + Pallet + Visual",
+	Icon = 95816097006870,
+	NotifySide = "Right",
+	ShowCustomCursor = true,
+	Center = true,
+	AutoShow = true,
+})
+
+local Tabs = {
+	Main = Window:AddTab("Main", "user"),
+	Visual = Window:AddTab("Visual", "sun"),
+	["UI Settings"] = Window:AddTab("UI Settings", "settings"),
+}
+
+------------------------------------------------------------------------
+-- SERVICES & SHARED
+------------------------------------------------------------------------
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
+local Camera = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+
+------------------------------------------------------------------------
+-- AUTOGRAB STATE
+------------------------------------------------------------------------
+local AG = {
+	enabled = false,
+	isHolding = false,
+	lastReleaseTime = 0,
+	wasHoldingCharacter = false,
+	maxDistance = 28,
+	fov = 0.015,
+	releaseCooldown = 1.0,
+}
+
+local function ag_press()
+	pcall(function()
+		if mouse1press then mouse1press() end
+	end)
+end
+
+local function ag_release()
+	pcall(function()
+		if mouse1release then mouse1release() end
+	end)
+end
+
+local function ag_isCentered(pos)
+	local screen, onScreen = Camera:WorldToViewportPoint(pos)
+	if not onScreen or screen.Z <= 0 then return false end
+	local size = Camera.ViewportSize
+	local dx = (screen.X - size.X * 0.5) / size.X
+	local dy = (screen.Y - size.Y * 0.5) / size.Y
+	return (dx * dx + dy * dy) <= (AG.fov * AG.fov)
+end
+
+local function ag_getGrabbedPart()
+	local grabParts = workspace:FindFirstChild("GrabParts")
+	if not grabParts then return nil end
+	local grabPart = grabParts:FindFirstChild("GrabPart")
+	if not grabPart then return nil end
+	local weld = grabPart:FindFirstChild("WeldConstraint")
+	if not weld then return nil end
+	return weld.Part1
+end
+
+local function ag_isLocalPlayerHolding()
+	return ag_getGrabbedPart() ~= nil
+end
+
+local function ag_isHoldingCharacter()
+	local part = ag_getGrabbedPart()
+	if not part then return false end
+	local model = part:FindFirstAncestorOfClass("Model")
+	if not model then return false end
+	if Players:GetPlayerFromCharacter(model) then return true end
+	if model:FindFirstChildOfClass("Humanoid") then return true end
+	return false
+end
+
+local function ag_isAlreadyGrabbed(character)
+	local part = ag_getGrabbedPart()
+	if not part then return false end
+	return part:IsDescendantOf(character)
+end
+
+local function ag_getAllParts(character)
+	local parts = {}
+	for _, p in ipairs(character:GetDescendants()) do
+		if p:IsA("BasePart") then
+			table.insert(parts, p)
+		end
+	end
+	return parts
+end
+
+local function ag_setEnabled(value)
+	AG.enabled = value
+	if not value and AG.isHolding then
+		ag_release()
+		AG.isHolding = false
+	end
+	Library:Notify({
+		Title = "AutoGrab",
+		Description = value and "ON" or "OFF",
+		Time = 2,
+	})
+end
+
+------------------------------------------------------------------------
+-- HEAD LOCK STATE
+------------------------------------------------------------------------
+local HL = {
+	enabled = false,
+	target = nil,
+	smoothness = 0.18,
+}
+
+local function hl_getClosestPlayerToCenter()
+	local closestPlayer = nil
+	local closestDistance = math.huge
+	local viewportSize = Camera.ViewportSize
+	local center = Vector2.new(viewportSize.X / 2, viewportSize.Y / 2)
+
+	for _, otherPlayer in ipairs(Players:GetPlayers()) do
+		if otherPlayer ~= LocalPlayer then
+			local character = otherPlayer.Character
+			if character then
+				local humanoid = character:FindFirstChildOfClass("Humanoid")
+				local head = character:FindFirstChild("Head")
+				if humanoid and head and humanoid.Health > 0 then
+					local screenPos, visible = Camera:WorldToViewportPoint(head.Position)
+					if visible and screenPos.Z > 0 then
+						local pos = Vector2.new(screenPos.X, screenPos.Y)
+						local distance = (pos - center).Magnitude
+						if distance < closestDistance then
+							closestDistance = distance
+							closestPlayer = otherPlayer
+						end
+					end
+				end
+			end
+		end
+	end
+	return closestPlayer
+end
+
+local function hl_setEnabled(value)
+	HL.enabled = value
+	if value then
+		HL.target = hl_getClosestPlayerToCenter()
+	else
+		HL.target = nil
+	end
+	Library:Notify({
+		Title = "Head Lock",
+		Description = value and "ON" or "OFF",
+		Time = 2,
+	})
+end
+
+------------------------------------------------------------------------
+-- PALLET ASSIST STATE
+------------------------------------------------------------------------
+local PA = {
+	enabled = false,
+	align = nil,
+	lastCheck = 0,
+	maxStickDistance = 6,
+	checkInterval = 0.03,
+	unloaded = false,
+}
+
+local function pa_getRoot()
+	local char = LocalPlayer.Character
+	return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function pa_clearAssist()
+	if PA.align then
+		pcall(function() PA.align:Destroy() end)
+		PA.align = nil
+	end
+end
+
+local function pa_isPalletLike(part)
+	if not part or not part:IsA("BasePart") or part.Anchored then return false end
+	local name = part.Name:lower()
+	if name:find("pallet") or name:find("board") or name:find("platform") or name:find("wood") or name:find("plank") then
+		return true
+	end
+	local size = part.Size
+	return size.Y < 4 and (size.X > 3 or size.Z > 3)
+end
+
+local function pa_findPlatformBelow(root)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { LocalPlayer.Character }
+	local result = workspace:Raycast(root.Position, Vector3.new(0, -PA.maxStickDistance, 0), params)
+	if result and pa_isPalletLike(result.Instance) then
+		return result.Instance, result.Position
+	end
+	return nil, nil
+end
+
+local function pa_createAlign(root, platform)
+	pa_clearAssist()
+	local att0 = Instance.new("Attachment")
+	att0.Parent = root
+	local att1 = Instance.new("Attachment")
+	att1.Parent = platform
+	local a = Instance.new("AlignPosition")
+	a.Attachment0 = att0
+	a.Attachment1 = att1
+	a.RigidityEnabled = false
+	a.MaxForce = 4000
+	a.MaxVelocity = 40
+	a.Responsiveness = 25
+	a.ApplyAtCenterOfMass = true
+	a.Parent = root
+	PA.align = a
+	att1.Position = Vector3.new(0, platform.Size.Y * 0.5 + 2.5, 0)
+end
+
+local function pa_setEnabled(value)
+	PA.enabled = value
+	if not value then
+		pa_clearAssist()
+	end
+	Library:Notify({
+		Title = "Pallet Assist",
+		Description = value and "ON" or "OFF",
+		Time = 2,
+	})
+end
+
+------------------------------------------------------------------------
+-- WORLD VISUAL ENHANCER v6 (logic only, no custom UI)
+------------------------------------------------------------------------
+local WV = {
+	enabled = true,
+	currentPreset = "RealisticSunset",
+}
+
+local Original = {
+	Ambient = Lighting.Ambient,
+	OutdoorAmbient = Lighting.OutdoorAmbient,
+	Brightness = Lighting.Brightness,
+	ClockTime = Lighting.ClockTime,
+	FogColor = Lighting.FogColor,
+	FogStart = Lighting.FogStart,
+	FogEnd = Lighting.FogEnd,
+	ColorShift_Top = Lighting.ColorShift_Top,
+	ColorShift_Bottom = Lighting.ColorShift_Bottom,
+	EnvironmentDiffuseScale = Lighting.EnvironmentDiffuseScale,
+	EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale,
+	ExposureCompensation = Lighting.ExposureCompensation,
+	GlobalShadows = Lighting.GlobalShadows,
+	ShadowSoftness = Lighting.ShadowSoftness,
+}
+
+local OriginalSky = nil
+do
+	local existing = Lighting:FindFirstChildOfClass("Sky")
+	if existing then
+		OriginalSky = existing:Clone()
+	end
+end
+
+local function clearOldEffects()
+	for _, child in ipairs(Lighting:GetChildren()) do
+		if (child:IsA("BloomEffect") or child:IsA("ColorCorrectionEffect")
+			or child:IsA("SunRaysEffect") or child:IsA("DepthOfFieldEffect")
+			or child:IsA("BlurEffect") or child:IsA("Atmosphere")
+			or child:IsA("Sky"))
+			and child:GetAttribute("WorldEnhancer") then
+			child:Destroy()
+		end
+	end
+end
+
+local function makeEffect(className, props)
+	local e = Instance.new(className)
+	e:SetAttribute("WorldEnhancer", true)
+	for k, v in pairs(props) do
+		e[k] = v
+	end
+	e.Parent = Lighting
+	return e
+end
+
+local function applyDreamSky()
+	for _, c in ipairs(Lighting:GetChildren()) do
+		if c:IsA("Sky") and not c:GetAttribute("WorldEnhancer") then
+			c:Destroy()
+		end
+	end
+	local sky = Instance.new("Sky")
+	sky:SetAttribute("WorldEnhancer", true)
+	sky.Name = "DreamNightSky"
+	sky.SkyboxBk = "rbxassetid://159454299"
+	sky.SkyboxDn = "rbxassetid://159454296"
+	sky.SkyboxFt = "rbxassetid://159454293"
+	sky.SkyboxLf = "rbxassetid://159454286"
+	sky.SkyboxRt = "rbxassetid://159454300"
+	sky.SkyboxUp = "rbxassetid://159454288"
+	sky.CelestialBodiesShown = true
+	sky.StarCount = 5000
+	sky.SunAngularSize = 0
+	sky.MoonAngularSize = 18
+	sky.Parent = Lighting
+end
+
+local function applySunsetSky()
+	for _, c in ipairs(Lighting:GetChildren()) do
+		if c:IsA("Sky") and not c:GetAttribute("WorldEnhancer") then
+			c:Destroy()
+		end
+	end
+	local sky = Instance.new("Sky")
+	sky:SetAttribute("WorldEnhancer", true)
+	sky.Name = "SunsetSky"
+	sky.CelestialBodiesShown = true
+	sky.StarCount = 600
+	sky.SunAngularSize = 16
+	sky.MoonAngularSize = 0
+	sky.Parent = Lighting
+end
+
+local Presets = {
+	RealisticSunset = {
+		name = "Realistic Sunset",
+		Ambient = Color3.fromRGB(90, 80, 95),
+		OutdoorAmbient = Color3.fromRGB(155, 135, 120),
+		Brightness = 2.55,
+		ClockTime = 16.7,
+		FogColor = Color3.fromRGB(245, 210, 175),
+		FogStart = 100,
+		FogEnd = 2600,
+		ColorShift_Top = Color3.fromRGB(255, 195, 140),
+		ColorShift_Bottom = Color3.fromRGB(75, 70, 90),
+		EnvironmentDiffuseScale = 0.65,
+		EnvironmentSpecularScale = 1.0,
+		ExposureCompensation = 0.12,
+		GlobalShadows = true,
+		ShadowSoftness = 0.55,
+		Bloom = { Intensity = 1.3, Size = 60, Threshold = 0.72 },
+		ColorCorrection = {
+			Brightness = 0.02,
+			Contrast = 0.13,
+			Saturation = 0.16,
+			TintColor = Color3.fromRGB(255, 238, 220)
+		},
+		SunRays = { Intensity = 0.06, Spread = 0.5 },
+		Atmosphere = {
+			Density = 0.28,
+			Offset = 0.2,
+			Color = Color3.fromRGB(255, 205, 165),
+			Decay = Color3.fromRGB(130, 100, 90),
+			Glare = 0.25,
+			Haze = 1.6
+		},
+		skyFn = applySunsetSky,
+	},
+	DreamNight = {
+		name = "Dream Night",
+		Ambient = Color3.fromRGB(55, 60, 95),
+		OutdoorAmbient = Color3.fromRGB(75, 85, 130),
+		Brightness = 2.35,
+		ClockTime = 21.8,
+		FogColor = Color3.fromRGB(70, 80, 130),
+		FogStart = 80,
+		FogEnd = 2000,
+		ColorShift_Top = Color3.fromRGB(140, 160, 220),
+		ColorShift_Bottom = Color3.fromRGB(40, 45, 80),
+		EnvironmentDiffuseScale = 0.7,
+		EnvironmentSpecularScale = 1.05,
+		ExposureCompensation = 0.18,
+		GlobalShadows = true,
+		ShadowSoftness = 0.55,
+		Bloom = { Intensity = 1.9, Size = 85, Threshold = 0.5 },
+		ColorCorrection = {
+			Brightness = 0.06,
+			Contrast = 0.16,
+			Saturation = 0.2,
+			TintColor = Color3.fromRGB(200, 210, 255)
+		},
+		SunRays = { Intensity = 0.03, Spread = 0.35 },
+		Atmosphere = {
+			Density = 0.3,
+			Offset = 0.2,
+			Color = Color3.fromRGB(90, 85, 150),
+			Decay = Color3.fromRGB(40, 35, 70),
+			Glare = 0.2,
+			Haze = 1.9
+		},
+		skyFn = applyDreamSky,
+	},
+}
+
+local function applyPreset(name)
+	local p = Presets[name]
+	if not p then return end
+	WV.currentPreset = name
+	clearOldEffects()
+
+	Lighting.Ambient = p.Ambient
+	Lighting.OutdoorAmbient = p.OutdoorAmbient
+	Lighting.Brightness = p.Brightness
+	Lighting.ClockTime = p.ClockTime
+	Lighting.FogColor = p.FogColor
+	Lighting.FogStart = p.FogStart
+	Lighting.FogEnd = p.FogEnd
+	Lighting.ColorShift_Top = p.ColorShift_Top
+	Lighting.ColorShift_Bottom = p.ColorShift_Bottom
+	Lighting.EnvironmentDiffuseScale = p.EnvironmentDiffuseScale
+	Lighting.EnvironmentSpecularScale = p.EnvironmentSpecularScale
+	Lighting.ExposureCompensation = p.ExposureCompensation
+	Lighting.GlobalShadows = p.GlobalShadows
+	pcall(function() Lighting.ShadowSoftness = p.ShadowSoftness or 0.5 end)
+
+	if p.Bloom then
+		makeEffect("BloomEffect", {
+			Intensity = p.Bloom.Intensity,
+			Size = p.Bloom.Size,
+			Threshold = p.Bloom.Threshold,
+		})
+	end
+	if p.ColorCorrection then
+		makeEffect("ColorCorrectionEffect", {
+			Brightness = p.ColorCorrection.Brightness,
+			Contrast = p.ColorCorrection.Contrast,
+			Saturation = p.ColorCorrection.Saturation,
+			TintColor = p.ColorCorrection.TintColor,
+		})
+	end
+	if p.SunRays then
+		makeEffect("SunRaysEffect", {
+			Intensity = p.SunRays.Intensity,
+			Spread = p.SunRays.Spread,
+		})
+	end
+	if p.Atmosphere then
+		makeEffect("Atmosphere", {
+			Density = p.Atmosphere.Density,
+			Offset = p.Atmosphere.Offset,
+			Color = p.Atmosphere.Color,
+			Decay = p.Atmosphere.Decay,
+			Glare = p.Atmosphere.Glare,
+			Haze = p.Atmosphere.Haze,
+		})
+	end
+	if p.skyFn then
+		p.skyFn()
+	end
+end
+
+local function restoreOriginal()
+	clearOldEffects()
+	for k, v in pairs(Original) do
+		pcall(function() Lighting[k] = v end)
+	end
+	if OriginalSky then
+		local s = OriginalSky:Clone()
+		s.Parent = Lighting
+	end
+	WV.enabled = false
+end
+
+local function wv_setEnabled(value)
+	WV.enabled = value
+	if value then
+		applyPreset(WV.currentPreset)
+	else
+		restoreOriginal()
+	end
+	Library:Notify({
+		Title = "World Visual",
+		Description = value and "ON" or "OFF",
+		Time = 2,
+	})
+end
+
+-- Apply default on load
+applyPreset("RealisticSunset")
+
+------------------------------------------------------------------------
+-- UI: MAIN TAB
+------------------------------------------------------------------------
+local AutoGrabBox = Tabs.Main:AddGroupbox({
+	Side = "Left",
+	Name = "AutoGrab",
+	Description = "Q to toggle (or use UI)",
+	IconName = "hand",
+})
+
+AutoGrabBox:AddToggle("AutoGrabEnabled", {
+	Text = "Enable AutoGrab",
+	Default = false,
+	Tooltip = "Auto grab players/NPCs in FOV",
+	Callback = function(Value)
+		ag_setEnabled(Value)
+	end,
+})
+
+AutoGrabBox:AddSlider("AutoGrabMaxDist", {
+	Text = "Max Distance",
+	Default = 28,
+	Min = 5,
+	Max = 60,
+	Rounding = 0,
+	Suffix = " studs",
+	Callback = function(Value)
+		AG.maxDistance = Value
+	end,
+})
+
+AutoGrabBox:AddSlider("AutoGrabFOV", {
+	Text = "FOV Radius",
+	Default = 0.015,
+	Min = 0.005,
+	Max = 0.1,
+	Rounding = 3,
+	Callback = function(Value)
+		AG.fov = Value
+	end,
+})
+
+AutoGrabBox:AddSlider("AutoGrabCooldown", {
+	Text = "Release Cooldown",
+	Default = 1.0,
+	Min = 0,
+	Max = 5,
+	Rounding = 1,
+	Suffix = "s",
+	Callback = function(Value)
+		AG.releaseCooldown = Value
+	end,
+})
+
+AutoGrabBox:AddLabel("Cooldown only after releasing Player/NPC")
+
+local HeadLockBox = Tabs.Main:AddGroupbox({
+	Side = "Left",
+	Name = "Head Lock",
+	Description = "C to toggle (or use UI)",
+	IconName = "crosshair",
+})
+
+HeadLockBox:AddToggle("HeadLockEnabled", {
+	Text = "Enable Head Lock",
+	Default = false,
+	Tooltip = "Locks camera to closest player's head",
+	Callback = function(Value)
+		hl_setEnabled(Value)
+	end,
+})
+
+HeadLockBox:AddSlider("HeadLockSmooth", {
+	Text = "Smoothness",
+	Default = 0.18,
+	Min = 0.05,
+	Max = 1,
+	Rounding = 2,
+	Callback = function(Value)
+		HL.smoothness = Value
+	end,
+})
+
+HeadLockBox:AddLabel("Higher = faster tracking")
+
+local PalletBox = Tabs.Main:AddGroupbox({
+	Side = "Right",
+	Name = "Pallet Assist",
+	Description = "V to toggle (or use UI)",
+	IconName = "box",
+})
+
+PalletBox:AddToggle("PalletEnabled", {
+	Text = "Enable Pallet Assist",
+	Default = false,
+	Tooltip = "Sticks you to pallets/platforms below",
+	Callback = function(Value)
+		pa_setEnabled(Value)
+	end,
+})
+
+PalletBox:AddSlider("PalletMaxDist", {
+	Text = "Max Stick Distance",
+	Default = 6,
+	Min = 2,
+	Max = 15,
+	Rounding = 0,
+	Suffix = " studs",
+	Callback = function(Value)
+		PA.maxStickDistance = Value
+	end,
+})
+
+PalletBox:AddLabel("Detects pallet / board / platform / wood")
+
+local InfoBox = Tabs.Main:AddGroupbox({
+	Side = "Right",
+	Name = "Info / Keybinds",
+	IconName = "info",
+})
+
+InfoBox:AddLabel("Q  →  AutoGrab toggle")
+InfoBox:AddLabel("C  →  Head Lock toggle")
+InfoBox:AddLabel("V  →  Pallet Assist toggle")
+InfoBox:AddDivider()
+InfoBox:AddLabel("All features also controllable from UI toggles above.")
+InfoBox:AddLabel("Menu keybind set in UI Settings.")
+
+------------------------------------------------------------------------
+-- UI: VISUAL TAB (World Visual Enhancer)
+------------------------------------------------------------------------
+local VisualMainBox = Tabs.Visual:AddGroupbox({
+	Side = "Left",
+	Name = "World Visual",
+	Description = "Lighting presets",
+	IconName = "sun",
+})
+
+VisualMainBox:AddToggle("WorldVisualEnabled", {
+	Text = "Enable World Visual",
+	Default = true,
+	Tooltip = "Apply lighting / sky / effects presets",
+	Callback = function(Value)
+		wv_setEnabled(Value)
+	end,
+})
+
+VisualMainBox:AddDropdown("WorldVisualPreset", {
+	Values = { "Realistic Sunset", "Dream Night" },
+	Default = 1,
+	Multi = false,
+	Text = "Preset",
+	Tooltip = "Select a visual preset",
+	Callback = function(Value)
+		local key = (Value == "Dream Night") and "DreamNight" or "RealisticSunset"
+		WV.currentPreset = key
+		if WV.enabled then
+			applyPreset(key)
+		end
+		Library:Notify({
+			Title = "World Visual",
+			Description = "Preset: " .. Value,
+			Time = 2,
+		})
+	end,
+})
+
+VisualMainBox:AddDivider()
+
+VisualMainBox:AddButton({
+	Text = "Apply Realistic Sunset",
+	Func = function()
+		WV.currentPreset = "RealisticSunset"
+		if Options.WorldVisualPreset then
+			Options.WorldVisualPreset:SetValue("Realistic Sunset")
+		end
+		if not WV.enabled then
+			if Toggles.WorldVisualEnabled then
+				Toggles.WorldVisualEnabled:SetValue(true)
+			else
+				wv_setEnabled(true)
+			end
+		else
+			applyPreset("RealisticSunset")
+		end
+	end,
+	Tooltip = "Warm sunset lighting",
+})
+
+VisualMainBox:AddButton({
+	Text = "Apply Dream Night",
+	Func = function()
+		WV.currentPreset = "DreamNight"
+		if Options.WorldVisualPreset then
+			Options.WorldVisualPreset:SetValue("Dream Night")
+		end
+		if not WV.enabled then
+			if Toggles.WorldVisualEnabled then
+				Toggles.WorldVisualEnabled:SetValue(true)
+			else
+				wv_setEnabled(true)
+			end
+		else
+			applyPreset("DreamNight")
+		end
+	end,
+	Tooltip = "Brighter night + moon glow",
+})
+
+VisualMainBox:AddButton({
+	Text = "Restore Original",
+	Func = function()
+		restoreOriginal()
+		if Toggles.WorldVisualEnabled then
+			Toggles.WorldVisualEnabled:SetValue(false)
+		else
+			WV.enabled = false
+		end
+		Library:Notify({
+			Title = "World Visual",
+			Description = "Original lighting restored",
+			Time = 2,
+		})
+	end,
+	Tooltip = "Revert all Lighting changes",
+})
+
+local VisualInfoBox = Tabs.Visual:AddGroupbox({
+	Side = "Right",
+	Name = "Info",
+	IconName = "info",
+})
+
+VisualInfoBox:AddLabel("Realistic Sunset — warm golden hour")
+VisualInfoBox:AddLabel("Dream Night — brighter night, big moon")
+VisualInfoBox:AddDivider()
+VisualInfoBox:AddLabel("Enable toggle applies current preset.")
+VisualInfoBox:AddLabel("Disable / Restore returns original lighting.")
+VisualInfoBox:AddLabel("Effects tagged WorldEnhancer are cleaned on unload.")
+
+------------------------------------------------------------------------
+-- LOOPS
+------------------------------------------------------------------------
+RunService.RenderStepped:Connect(function()
+	-- AutoGrab
+	if not AG.enabled then
+		if AG.isHolding then
+			ag_release()
+			AG.isHolding = false
+		end
+	else
+		local currentlyHoldingChar = ag_isHoldingCharacter()
+		if AG.wasHoldingCharacter and not currentlyHoldingChar then
+			AG.lastReleaseTime = tick()
+		end
+		AG.wasHoldingCharacter = currentlyHoldingChar
+
+		if tick() - AG.lastReleaseTime >= AG.releaseCooldown then
+			if not ag_isLocalPlayerHolding() then
+				local char = LocalPlayer.Character
+				local root = char and char:FindFirstChild("HumanoidRootPart")
+				if root then
+					local myPos = root.Position
+					local found = false
+
+					for _, plr in ipairs(Players:GetPlayers()) do
+						if plr ~= LocalPlayer then
+							local otherChar = plr.Character
+							if otherChar then
+								local otherRoot = otherChar:FindFirstChild("HumanoidRootPart")
+								if otherRoot and (myPos - otherRoot.Position).Magnitude <= AG.maxDistance then
+									if not ag_isAlreadyGrabbed(otherChar) then
+										for _, part in ipairs(ag_getAllParts(otherChar)) do
+											if ag_isCentered(part.Position) then
+												found = true
+												break
+											end
+										end
+									end
+								end
+							end
+						end
+						if found then break end
+					end
+
+					if not found then
+						for _, obj in ipairs(workspace:GetChildren()) do
+							if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") and not Players:GetPlayerFromCharacter(obj) then
+								local hrp = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
+								if hrp and (myPos - hrp.Position).Magnitude <= AG.maxDistance then
+									if not ag_isAlreadyGrabbed(obj) then
+										for _, part in ipairs(ag_getAllParts(obj)) do
+											if ag_isCentered(part.Position) then
+												found = true
+												break
+											end
+										end
+									end
+								end
+							end
+							if found then break end
+						end
+					end
+
+					if found then
+						if not AG.isHolding then
+							ag_press()
+							AG.isHolding = true
+						end
+					else
+						if AG.isHolding then
+							ag_release()
+							AG.isHolding = false
+						end
+					end
+				end
+			end
+		end
+	end
+end)
+
+RunService:BindToRenderStep("HeadLockOn", Enum.RenderPriority.Camera.Value + 1, function()
+	if not HL.enabled or not HL.target then return end
+	local character = HL.target.Character
+	if not character then
+		HL.target = nil
+		return
+	end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local head = character:FindFirstChild("Head")
+	if not humanoid or humanoid.Health <= 0 or not head then
+		HL.target = nil
+		return
+	end
+	local currentCFrame = Camera.CFrame
+	local targetCFrame = CFrame.lookAt(currentCFrame.Position, head.Position)
+	Camera.CFrame = currentCFrame:Lerp(targetCFrame, HL.smoothness)
+end)
+
+RunService.Heartbeat:Connect(function()
+	if PA.unloaded then return end
+	if not PA.enabled then
+		pa_clearAssist()
+		return
+	end
+	local now = tick()
+	if now - PA.lastCheck < PA.checkInterval then return end
+	PA.lastCheck = now
+	local root = pa_getRoot()
+	if not root then
+		pa_clearAssist()
+		return
+	end
+	local platform = pa_findPlatformBelow(root)
+	if platform then
+		if not PA.align or PA.align.Parent ~= root then
+			pa_createAlign(root, platform)
+		end
+	else
+		pa_clearAssist()
+	end
+end)
+
+------------------------------------------------------------------------
+-- KEYBINDS (legacy Q / C / V still work + sync UI)
+------------------------------------------------------------------------
+UserInputService.InputBegan:Connect(function(input, gpe)
+	if gpe then return end
+	if input.KeyCode == Enum.KeyCode.Q then
+		local newVal = not AG.enabled
+		if Toggles.AutoGrabEnabled then
+			Toggles.AutoGrabEnabled:SetValue(newVal)
+		else
+			ag_setEnabled(newVal)
+		end
+	elseif input.KeyCode == Enum.KeyCode.C then
+		local newVal = not HL.enabled
+		if Toggles.HeadLockEnabled then
+			Toggles.HeadLockEnabled:SetValue(newVal)
+		else
+			hl_setEnabled(newVal)
+		end
+	elseif input.KeyCode == Enum.KeyCode.V then
+		local newVal = not PA.enabled
+		if Toggles.PalletEnabled then
+			Toggles.PalletEnabled:SetValue(newVal)
+		else
+			pa_setEnabled(newVal)
+		end
+	end
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+	if AG.isHolding then
+		ag_release()
+		AG.isHolding = false
+	end
+	pa_clearAssist()
+end)
+
+------------------------------------------------------------------------
+-- UI SETTINGS
+------------------------------------------------------------------------
+local MenuGroup = Tabs["UI Settings"]:AddGroupbox({
+	Side = "Left",
+	Name = "Menu",
+	IconName = "wrench",
+})
+
+MenuGroup:AddToggle("KeybindMenuOpen", {
+	Default = Library.KeybindFrame and Library.KeybindFrame.Visible or false,
+	Text = "Open Keybind Menu",
+	Callback = function(value)
+		if Library.KeybindFrame then
+			Library.KeybindFrame.Visible = value
+		end
+	end,
+})
+
+MenuGroup:AddToggle("ShowCustomCursor", {
+	Text = "Custom Cursor",
+	Default = Library.ShowCustomCursor,
+	Callback = function(Value)
+		Library.ShowCustomCursor = Value
+	end,
+})
+
+MenuGroup:AddToggle("AlwaysOnTop", {
+	Text = "Always On Top",
+	Default = Window.AlwaysOnTop or false,
+	Callback = function(Value)
+		if Window.SetAlwaysOnTop then
+			Window:SetAlwaysOnTop(Value)
+		end
+	end,
+})
+
+MenuGroup:AddDropdown("NotificationSide", {
+	Values = { "Left", "Right" },
+	Default = "Right",
+	Text = "Notification Side",
+	Callback = function(Value)
+		Library:SetNotifySide(Value)
+	end,
+})
+
+MenuGroup:AddDropdown("DPIDropdown", {
+	Values = { "50%", "75%", "100%", "125%", "150%", "175%", "200%" },
+	Default = "100%",
+	Text = "DPI Scale",
+	Callback = function(Value)
+		Value = Value:gsub("%%", "")
+		local DPI = tonumber(Value)
+		if Library.SetDPIScale then
+			Library:SetDPIScale(DPI)
+		end
+	end,
+})
+
+if Library.CornerRadius then
+	MenuGroup:AddSlider("UICornerSlider", {
+		Text = "Corner Radius",
+		Default = Library.CornerRadius,
+		Min = 0,
+		Max = 20,
+		Rounding = 0,
+		Callback = function(value)
+			if Window.SetCornerRadius then
+				Window:SetCornerRadius(value)
+			end
+		end,
+	})
+end
+
+MenuGroup:AddDivider()
+MenuGroup:AddLabel("Menu bind"):AddKeyPicker("MenuKeybind", {
+	Default = "RightShift",
+	NoUI = true,
+	Text = "Menu keybind",
+})
+
+MenuGroup:AddButton({
+	Text = "Unload",
+	Func = function()
+		PA.unloaded = true
+		AG.enabled = false
+		HL.enabled = false
+		pa_clearAssist()
+		if AG.isHolding then
+			ag_release()
+			AG.isHolding = false
+		end
+		restoreOriginal()
+		Library:Unload()
+	end,
+})
+
+Library.ToggleKeybind = Options.MenuKeybind
+
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ "MenuKeybind" })
+ThemeManager:SetFolder("FTAPTools")
+SaveManager:SetFolder("FTAPTools/config")
+SaveManager:BuildConfigSection(Tabs["UI Settings"])
+ThemeManager:ApplyToTab(Tabs["UI Settings"])
+SaveManager:LoadAutoloadConfig()
+
+Library:OnUnload(function()
+	PA.unloaded = true
+	AG.enabled = false
+	HL.enabled = false
+	pa_clearAssist()
+	if AG.isHolding then
+		ag_release()
+		AG.isHolding = false
+	end
+	restoreOriginal()
+	print("[FTAP Tools] Unloaded")
+end)
+
+print("[FTAP Tools] Loaded — AutoGrab / HeadLock / Pallet / World Visual")
+print("Q = AutoGrab | C = Head Lock | V = Pallet Assist")
