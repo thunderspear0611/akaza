@@ -387,7 +387,7 @@ local function createAlign(root, platform)
     a.Attachment0 = att0
     a.Attachment1 = att1
     a.RigidityEnabled = false
-    a.MaxForce = 4000
+    a.MaxForce = 3500
     a.MaxVelocity = 40
     a.Responsiveness = 25
     a.ApplyAtCenterOfMass = true
