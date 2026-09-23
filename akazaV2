@@ -1,6 +1,6 @@
--- FTAP Center Screen Auto Grab v8
+-- FTAP AutoGrab v16
 -- Toggle: Q
--- Skips if YOU are already holding something + ignores already-grabbed players
+-- 1s cooldown only after releasing a Player or NPC (not normal objects)
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -12,29 +12,24 @@ local LocalPlayer = Players.LocalPlayer
 -- SETTINGS
 ------------------------
 local maxDistance = 28
-local fov = 0.01
-local checkInterval = 0.02
+local fov = 0.015
+local releaseCooldown = 1.0
 ------------------------
 
 local enabled = false
 local isHolding = false
-local lastCheck = 0
+local lastReleaseTime = 0
+local wasHoldingCharacter = false
 
 local function press()
-    pcall(function() if mouse1press then mouse1press() end end)
     pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        local vp = Camera.ViewportSize
-        vim:SendMouseButtonEvent(vp.X/2, vp.Y/2, 0, true, game, 1)
+        if mouse1press then mouse1press() end
     end)
 end
 
 local function release()
-    pcall(function() if mouse1release then mouse1release() end end)
     pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        local vp = Camera.ViewportSize
-        vim:SendMouseButtonEvent(vp.X/2, vp.Y/2, 0, false, game, 1)
+        if mouse1release then mouse1release() end
     end)
 end
 
@@ -44,52 +39,59 @@ local function isCentered(pos)
     local size = Camera.ViewportSize
     local dx = (screen.X - size.X * 0.5) / size.X
     local dy = (screen.Y - size.Y * 0.5) / size.Y
-    return (dx*dx + dy*dy) <= (fov*fov)
+    return (dx * dx + dy * dy) <= (fov * fov)
 end
 
--- true if YOU currently have something grabbed
+local function getGrabbedPart()
+    local grabParts = workspace:FindFirstChild("GrabParts")
+    if not grabParts then return nil end
+    local grabPart = grabParts:FindFirstChild("GrabPart")
+    if not grabPart then return nil end
+    local weld = grabPart:FindFirstChild("WeldConstraint")
+    if not weld then return nil end
+    return weld.Part1
+end
+
 local function isLocalPlayerHolding()
-    local grabParts = workspace:FindFirstChild("GrabParts")
-    if not grabParts then return false end
-    local grabPart = grabParts:FindFirstChild("GrabPart")
-    if not grabPart then return false end
-    local weld = grabPart:FindFirstChild("WeldConstraint")
-    if not weld or not weld.Part1 then return false end
-    -- if GrabParts exists and has a valid weld, someone (including you) is holding
-    -- we treat any active GrabParts as "already holding"
-    return true
+    return getGrabbedPart() ~= nil
 end
 
--- true if the target player is already being held by someone
-local function isAlreadyGrabbed(character)
-    local grabParts = workspace:FindFirstChild("GrabParts")
-    if not grabParts then return false end
-    local grabPart = grabParts:FindFirstChild("GrabPart")
-    if not grabPart then return false end
-    local weld = grabPart:FindFirstChild("WeldConstraint")
-    if not weld or not weld.Part1 then return false end
-    return weld.Part1:IsDescendantOf(character)
-end
+-- true if the currently grabbed thing is a Player or NPC
+local function isHoldingCharacter()
+    local part = getGrabbedPart()
+    if not part then return false end
 
-local function isHeldByValue(character)
-    local player = Players:GetPlayerFromCharacter(character)
-    if player and player:FindFirstChild("IsHeld") and player.IsHeld.Value then
+    local model = part:FindFirstAncestorOfClass("Model")
+    if not model then return false end
+
+    -- real player
+    if Players:GetPlayerFromCharacter(model) then
+        return true
+    end
+    -- NPC (has Humanoid but not a player)
+    if model:FindFirstChildOfClass("Humanoid") then
         return true
     end
     return false
 end
 
-local function getBodyParts(character)
+local function isAlreadyGrabbed(character)
+    local part = getGrabbedPart()
+    if not part then return false end
+    return part:IsDescendantOf(character)
+end
+
+local function getAllParts(character)
     local parts = {}
-    for _, part in ipairs(character:GetChildren()) do
-        if part:IsA("BasePart") then
-            table.insert(parts, part)
+    for _, p in ipairs(character:GetDescendants()) do
+        if p:IsA("BasePart") then
+            table.insert(parts, p)
         end
     end
     return parts
 end
 
-RunService.Heartbeat:Connect(function()
+RunService.RenderStepped:Connect(function()
     if not enabled then
         if isHolding then
             release()
@@ -98,34 +100,38 @@ RunService.Heartbeat:Connect(function()
         return
     end
 
-    -- if you are already holding something, do nothing
-    if isLocalPlayerHolding() then
-        if isHolding then
-            -- keep the hold state, but don't start a new grab
-            return
-        end
+    local currentlyHoldingChar = isHoldingCharacter()
+
+    -- just released a player/NPC → start cooldown
+    if wasHoldingCharacter and not currentlyHoldingChar then
+        lastReleaseTime = tick()
+    end
+    wasHoldingCharacter = currentlyHoldingChar
+
+    -- still in cooldown
+    if tick() - lastReleaseTime < releaseCooldown then
         return
     end
 
-    local now = tick()
-    if now - lastCheck < checkInterval then return end
-    lastCheck = now
+    -- already holding anything → don't start new grab
+    if isLocalPlayerHolding() then return end
 
     local char = LocalPlayer.Character
-    if not char then return end
-    local root = char:FindFirstChild("HumanoidRootPart")
+    local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return end
 
+    local myPos = root.Position
     local found = false
 
+    -- Players
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and plr.Character then
-            local otherRoot = plr.Character:FindFirstChild("HumanoidRootPart")
-            if otherRoot then
-                local dist = (root.Position - otherRoot.Position).Magnitude
-                if dist <= maxDistance then
-                    if not isAlreadyGrabbed(plr.Character) and not isHeldByValue(plr.Character) then
-                        for _, part in ipairs(getBodyParts(plr.Character)) do
+        if plr ~= LocalPlayer then
+            local otherChar = plr.Character
+            if otherChar then
+                local otherRoot = otherChar:FindFirstChild("HumanoidRootPart")
+                if otherRoot and (myPos - otherRoot.Position).Magnitude <= maxDistance then
+                    if not isAlreadyGrabbed(otherChar) then
+                        for _, part in ipairs(getAllParts(otherChar)) do
                             if isCentered(part.Position) then
                                 found = true
                                 break
@@ -136,6 +142,26 @@ RunService.Heartbeat:Connect(function()
             end
         end
         if found then break end
+    end
+
+    -- NPCs (light scan)
+    if not found then
+        for _, obj in ipairs(workspace:GetChildren()) do
+            if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") and not Players:GetPlayerFromCharacter(obj) then
+                local hrp = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
+                if hrp and (myPos - hrp.Position).Magnitude <= maxDistance then
+                    if not isAlreadyGrabbed(obj) then
+                        for _, part in ipairs(getAllParts(obj)) do
+                            if isCentered(part.Position) then
+                                found = true
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+            if found then break end
+        end
     end
 
     if found then
@@ -170,8 +196,13 @@ LocalPlayer.CharacterAdded:Connect(function()
     end
 end)
 
-print("[FTAP AutoGrab v8] Loaded - Press Q")
-print("Does nothing while you are already holding something")
+print("[FTAP AutoGrab v16] Loaded - Press Q")
+print("1s cooldown only after releasing Player / NPC")
+
+
+
+
+
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
@@ -283,6 +314,11 @@ RunService:BindToRenderStep(
 		)
 	end
 )
+
+
+
+
+
 -- FTAP Pallet Assist v2
 -- Toggle: V
 -- Unload: P (completely removes the script)
@@ -351,7 +387,7 @@ local function createAlign(root, platform)
     a.Attachment0 = att0
     a.Attachment1 = att1
     a.RigidityEnabled = false
-    a.MaxForce = 25000
+    a.MaxForce = 5500
     a.MaxVelocity = 40
     a.Responsiveness = 25
     a.ApplyAtCenterOfMass = true
