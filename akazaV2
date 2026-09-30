@@ -214,7 +214,7 @@ local enabled = false
 local target = nil
 
 -- 数値を大きくすると速く追従
-local smoothness = 0.1
+local smoothness = 0.4
 
 -- 自分に一番近いプレイヤーを探す（3D距離）
 local function getClosestPlayer()
