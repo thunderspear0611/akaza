@@ -1,6 +1,4 @@
--- FTAP AutoGrab v16
--- Toggle: Q
--- 1s cooldown only after releasing a Player or NPC (not normal objects)
+- FTAP AutoGrab v20
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -8,18 +6,32 @@ local UserInputService = game:GetService("UserInputService")
 local Camera = workspace.CurrentCamera
 local LocalPlayer = Players.LocalPlayer
 
-------------------------
--- SETTINGS
-------------------------
-local maxDistance = 28
+local maxDistance = 29
 local fov = 0.015
 local releaseCooldown = 1.0
-------------------------
+local pressHoldTime = 0.05
+local releaseGapTime = 0.07
+local minPressFrames = 3
 
 local enabled = false
 local isHolding = false
 local lastReleaseTime = 0
 local wasHoldingCharacter = false
+
+local clickPhase = "idle"
+local clickPhaseStart = 0
+local pressFrameCount = 0
+
+local fovSq = fov * fov
+
+-- キャッシュ
+local npcCache = {}
+local npcNextRefresh = 0
+local npcRefreshInterval = 0.3
+
+-- GrabParts参照キャッシュ
+local grabPartsRef = nil
+local grabPartsNextCheck = 0
 
 local function press()
     pcall(function()
@@ -39,11 +51,21 @@ local function isCentered(pos)
     local size = Camera.ViewportSize
     local dx = (screen.X - size.X * 0.5) / size.X
     local dy = (screen.Y - size.Y * 0.5) / size.Y
-    return (dx * dx + dy * dy) <= (fov * fov)
+    return (dx * dx + dy * dy) <= fovSq
+end
+
+-- GrabParts参照を0.1秒ごとに更新 (FindFirstChild呼び出し削減)
+local function getGrabParts()
+    local now = tick()
+    if now >= grabPartsNextCheck or (grabPartsRef and not grabPartsRef.Parent) then
+        grabPartsRef = workspace:FindFirstChild("GrabParts")
+        grabPartsNextCheck = now + 0.1
+    end
+    return grabPartsRef
 end
 
 local function getGrabbedPart()
-    local grabParts = workspace:FindFirstChild("GrabParts")
+    local grabParts = getGrabParts()
     if not grabParts then return nil end
     local grabPart = grabParts:FindFirstChild("GrabPart")
     if not grabPart then return nil end
@@ -56,7 +78,6 @@ local function isLocalPlayerHolding()
     return getGrabbedPart() ~= nil
 end
 
--- true if the currently grabbed thing is a Player or NPC
 local function isHoldingCharacter()
     local part = getGrabbedPart()
     if not part then return false end
@@ -64,117 +85,169 @@ local function isHoldingCharacter()
     local model = part:FindFirstAncestorOfClass("Model")
     if not model then return false end
 
-    -- real player
     if Players:GetPlayerFromCharacter(model) then
         return true
     end
-    -- NPC (has Humanoid but not a player)
     if model:FindFirstChildOfClass("Humanoid") then
         return true
     end
     return false
 end
 
-local function isAlreadyGrabbed(character)
-    local part = getGrabbedPart()
-    if not part then return false end
-    return part:IsDescendantOf(character)
-end
-
-local function getAllParts(character)
-    local parts = {}
-    for _, p in ipairs(character:GetDescendants()) do
-        if p:IsA("BasePart") then
-            table.insert(parts, p)
+-- 軽量BasePart収集 (GetChildren再帰)
+local function collectBaseParts(root, list)
+    for _, c in ipairs(root:GetChildren()) do
+        if c:IsA("BasePart") then
+            list[#list + 1] = c
+        elseif c:IsA("Model") or c:IsA("Folder") or c:IsA("Accessory") then
+            collectBaseParts(c, list)
         end
     end
-    return parts
+    return list
 end
 
-RunService.RenderStepped:Connect(function()
-    if not enabled then
-        if isHolding then
-            release()
-            isHolding = false
+-- NPCキャッシュ更新
+local function refreshNpcCache()
+    npcCache = {}
+    for _, obj in ipairs(workspace:GetChildren()) do
+        if obj:IsA("Model") then
+            local hum = obj:FindFirstChildOfClass("Humanoid")
+            if hum and not Players:GetPlayerFromCharacter(obj) then
+                local anchor = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
+                if anchor then
+                    npcCache[#npcCache + 1] = {
+                        model = obj,
+                        anchor = anchor,
+                        parts = collectBaseParts(obj, {}),
+                    }
+                end
+            end
         end
-        return
     end
+end
 
-    local currentlyHoldingChar = isHoldingCharacter()
-
-    -- just released a player/NPC → start cooldown
-    if wasHoldingCharacter and not currentlyHoldingChar then
-        lastReleaseTime = tick()
-    end
-    wasHoldingCharacter = currentlyHoldingChar
-
-    -- still in cooldown
-    if tick() - lastReleaseTime < releaseCooldown then
-        return
-    end
-
-    -- already holding anything → don't start new grab
-    if isLocalPlayerHolding() then return end
-
+local function findTarget()
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
+    if not root then return false end
 
     local myPos = root.Position
-    local found = false
 
-    -- Players
+    -- プレイヤー
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer then
             local otherChar = plr.Character
             if otherChar then
                 local otherRoot = otherChar:FindFirstChild("HumanoidRootPart")
                 if otherRoot and (myPos - otherRoot.Position).Magnitude <= maxDistance then
-                    if not isAlreadyGrabbed(otherChar) then
-                        for _, part in ipairs(getAllParts(otherChar)) do
-                            if isCentered(part.Position) then
-                                found = true
-                                break
-                            end
+                    local parts = collectBaseParts(otherChar, {})
+                    for i = 1, #parts do
+                        local part = parts[i]
+                        if part.Parent and isCentered(part.Position) then
+                            return true
                         end
                     end
                 end
             end
         end
-        if found then break end
     end
 
-    -- NPCs (light scan)
-    if not found then
-        for _, obj in ipairs(workspace:GetChildren()) do
-            if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid") and not Players:GetPlayerFromCharacter(obj) then
-                local hrp = obj:FindFirstChild("HumanoidRootPart") or obj.PrimaryPart
-                if hrp and (myPos - hrp.Position).Magnitude <= maxDistance then
-                    if not isAlreadyGrabbed(obj) then
-                        for _, part in ipairs(getAllParts(obj)) do
-                            if isCentered(part.Position) then
-                                found = true
-                                break
-                            end
-                        end
+    -- NPC (キャッシュ使用)
+    for i = 1, #npcCache do
+        local entry = npcCache[i]
+        local anchor = entry.anchor
+        if anchor.Parent then
+            if (myPos - anchor.Position).Magnitude <= maxDistance then
+                local parts = entry.parts
+                for j = 1, #parts do
+                    local part = parts[j]
+                    if part.Parent and isCentered(part.Position) then
+                        return true
                     end
                 end
             end
-            if found then break end
         end
     end
 
-    if found then
-        if not isHolding then
+    return false
+end
+
+local function tickClickState(targetPresent)
+    local now = tick()
+
+    if clickPhase == "idle" then
+        if targetPresent then
             press()
-            isHolding = true
+            clickPhase = "pressing"
+            clickPhaseStart = now
+            pressFrameCount = 0
         end
-    else
+    elseif clickPhase == "pressing" then
+        pressFrameCount = pressFrameCount + 1
+        if now - clickPhaseStart >= pressHoldTime and pressFrameCount >= minPressFrames then
+            release()
+            clickPhase = "releasing"
+            clickPhaseStart = now
+        end
+    elseif clickPhase == "releasing" then
+        if now - clickPhaseStart >= releaseGapTime then
+            if targetPresent then
+                press()
+                clickPhase = "pressing"
+                clickPhaseStart = now
+                pressFrameCount = 0
+            else
+                clickPhase = "idle"
+            end
+        end
+    end
+end
+
+local function resetClickState()
+    if clickPhase == "pressing" then
+        release()
+    end
+    clickPhase = "idle"
+    clickPhaseStart = 0
+    pressFrameCount = 0
+end
+
+RunService.Heartbeat:Connect(function()
+    if not enabled then
         if isHolding then
             release()
             isHolding = false
         end
+        resetClickState()
+        return
     end
+
+    local now = tick()
+
+    if now >= npcNextRefresh then
+        npcNextRefresh = now + npcRefreshInterval
+        refreshNpcCache()
+    end
+
+    local currentlyHoldingChar = isHoldingCharacter()
+
+    if wasHoldingCharacter and not currentlyHoldingChar then
+        lastReleaseTime = now
+    end
+    wasHoldingCharacter = currentlyHoldingChar
+
+    if now - lastReleaseTime < releaseCooldown then
+        resetClickState()
+        return
+    end
+
+    if isLocalPlayerHolding() then
+        resetClickState()
+        return
+    end
+
+    local found = findTarget()
+    tickClickState(found)
 end)
 
 UserInputService.InputBegan:Connect(function(input, gpe)
@@ -185,6 +258,7 @@ UserInputService.InputBegan:Connect(function(input, gpe)
             release()
             isHolding = false
         end
+        resetClickState()
         print(enabled and "[AutoGrab] ON" or "[AutoGrab] OFF")
     end
 end)
@@ -194,10 +268,10 @@ LocalPlayer.CharacterAdded:Connect(function()
         release()
         isHolding = false
     end
+    resetClickState()
 end)
 
-print("[FTAP AutoGrab v16] Loaded - Press Q")
-print("1s cooldown only after releasing Player / NPC")
+print("[FTAP AutoGrab v20] Loaded - Press Q")
 
 
 
@@ -214,7 +288,7 @@ local enabled = false
 local target = nil
 
 -- 数値を大きくすると速く追従
-local smoothness = 0.2
+local smoothness = 0.15
 
 -- 自分に一番近いプレイヤーを探す（3D距離）
 local function getClosestPlayer()
