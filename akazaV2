@@ -4,17 +4,20 @@ local UserInputService = game:GetService("UserInputService")
 local Camera = workspace.CurrentCamera
 local LocalPlayer = Players.LocalPlayer
 
-local maxDistance = 29
-local fov = 0.015
-local releaseCooldown = 1.0
-local pressHoldTime = 0.05
-local releaseGapTime = 0.07
-local minPressFrames = 3
+-- ===== 設定 =====
+local maxDistance    = 29       -- 対象探索の最大距離 (studs)
+local fov            = 0.015    -- 画面中心からの許容半径 (viewport比)
+local pressHoldTime  = 0.05     -- 押しっぱなしにする時間
+local releaseGapTime = 0.07     -- 離してから次に押すまでの間隔
+local minPressFrames = 3        -- 最低押下フレーム数 (Heartbeat基準)
+
+local HOLD_RELEASE_COOLDOWN = 0.8   -- 条件2: プレイヤーを離した後 0.8 秒間停止
+-- ================
 
 local enabled = false
 local isHolding = false
-local lastReleaseTime = 0
-local wasHoldingCharacter = false
+local lastPlayerReleaseTime = -math.huge
+local wasHoldingPlayer = false
 
 local clickPhase = "idle"
 local clickPhaseStart = 0
@@ -30,15 +33,11 @@ local grabPartsRef = nil
 local grabPartsNextCheck = 0
 
 local function press()
-    pcall(function()
-        if mouse1press then mouse1press() end
-    end)
+    pcall(function() if mouse1press then mouse1press() end end)
 end
 
 local function release()
-    pcall(function()
-        if mouse1release then mouse1release() end
-    end)
+    pcall(function() if mouse1release then mouse1release() end end)
 end
 
 local function isCentered(pos)
@@ -73,19 +72,23 @@ local function isLocalPlayerHolding()
     return getGrabbedPart() ~= nil
 end
 
-local function isHoldingCharacter()
+-- 掴んでいる対象が「プレイヤーのキャラクター」かどうか
+local function isHoldingPlayerCharacter()
     local part = getGrabbedPart()
     if not part then return false end
 
-    local model = part:FindFirstAncestorOfClass("Model")
+    local model = part:FindFirstChildOfClass("Model")
+    if not model then
+        -- 親をたどってModelを探す (Accessory等の中にいる場合)
+        model = part:FindFirstAncestorOfClass("Model")
+    end
     if not model then return false end
 
-    if Players:GetPlayerFromCharacter(model) then
-        return true
-    end
-    if model:FindFirstChildOfClass("Humanoid") then
-        return true
-    end
+    if Players:GetPlayerFromCharacter(model) then return true end
+
+    -- プレイヤーキャラでなくてもHumanoid持ちならキャラ扱い
+    if model:FindFirstChildOfClass("Humanoid") then return true end
+
     return false
 end
 
@@ -123,7 +126,6 @@ local function findTarget()
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return false end
-
     local myPos = root.Position
 
     for _, plr in ipairs(Players:GetPlayers()) do
@@ -147,14 +149,12 @@ local function findTarget()
     for i = 1, #npcCache do
         local entry = npcCache[i]
         local anchor = entry.anchor
-        if anchor.Parent then
-            if (myPos - anchor.Position).Magnitude <= maxDistance then
-                local parts = entry.parts
-                for j = 1, #parts do
-                    local part = parts[j]
-                    if part.Parent and isCentered(part.Position) then
-                        return true
-                    end
+        if anchor.Parent and (myPos - anchor.Position).Magnitude <= maxDistance then
+            local parts = entry.parts
+            for j = 1, #parts do
+                local part = parts[j]
+                if part.Parent and isCentered(part.Position) then
+                    return true
                 end
             end
         end
@@ -215,24 +215,27 @@ RunService.Heartbeat:Connect(function()
 
     local now = tick()
 
+    -- NPCキャッシュ更新
     if now >= npcNextRefresh then
         npcNextRefresh = now + npcRefreshInterval
         refreshNpcCache()
     end
 
-    local currentlyHoldingChar = isHoldingCharacter()
-
-    if wasHoldingCharacter and not currentlyHoldingChar then
-        lastReleaseTime = now
+    -- 条件2: プレイヤーを離した検出
+    local holdingPlayer = isHoldingPlayerCharacter()
+    if wasHoldingPlayer and not holdingPlayer then
+        lastPlayerReleaseTime = now
     end
-    wasHoldingCharacter = currentlyHoldingChar
+    wasHoldingPlayer = holdingPlayer
 
-    if now - lastReleaseTime < releaseCooldown then
+    -- 条件1: 何か掴んでいる間は絶対に発動しない
+    if isLocalPlayerHolding() then
         resetClickState()
         return
     end
 
-    if isLocalPlayerHolding() then
+    -- 条件2: プレイヤーを離した後 0.8 秒間は停止
+    if now - lastPlayerReleaseTime < HOLD_RELEASE_COOLDOWN then
         resetClickState()
         return
     end
@@ -259,9 +262,10 @@ LocalPlayer.CharacterAdded:Connect(function()
         release()
         isHolding = false
     end
+    wasHoldingPlayer = false
+    lastPlayerReleaseTime = -math.huge
     resetClickState()
 end)
-
 
 
 
