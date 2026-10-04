@@ -262,6 +262,11 @@ LocalPlayer.CharacterAdded:Connect(function()
     resetClickState()
 end)
 
+
+
+
+
+
 print("[FTAP AutoGrab v20] Loaded - Press Q")
 
 local Players2 = game:GetService("Players")
@@ -353,6 +358,11 @@ RunService2:BindToRenderStep(
         camera.CFrame = currentCFrame:Lerp(targetCFrame, aimSmoothness)
     end
 )
+
+
+
+
+
 
 local Players3 = game:GetService("Players")
 local RunService3 = game:GetService("RunService")
